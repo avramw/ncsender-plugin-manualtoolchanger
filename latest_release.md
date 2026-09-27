@@ -1,4 +1,4 @@
 ## What's Changed
 
 ### 🐛 Bug Fixes
-- Fixed an issue where G-code sent during a stop event could leak modal state into the running job
+- Spindle speed override is now ignored during a tool change, so the tool change sequence runs at the expected speed regardless of your current override setting
