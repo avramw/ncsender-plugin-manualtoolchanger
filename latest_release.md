@@ -1,4 +1,5 @@
 ## What's Changed
 
-### 🐛 Bug Fixes
-- Spindle speed override is now ignored during a tool change, so the tool change sequence runs at the expected speed regardless of your current override setting
+### 🔧 Improvements
+- Z0 is still set before the tool length reference is taken during a manual tool change
+- The tool length setter (TLS) no longer runs automatically after homing
