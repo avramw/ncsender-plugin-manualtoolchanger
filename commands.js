@@ -117,7 +117,6 @@ const buildInitialConfig = (raw = {}) => {
     autoSwap: raw.autoSwap === true,
     pauseBeforeUnload: raw.pauseBeforeUnload !== false,
     showMacroCommand: raw.showMacroCommand ?? false,
-    performTlsAfterHome: raw.performTlsAfterHome ?? false,
     waitForSpindle: raw.waitForSpindle !== false,
 
     // Advanced Settings (no UI, JSON only)
@@ -188,7 +187,36 @@ const formatGCode = (gcode) => {
 
 // === Routine Generators ===
 
-function createToolLengthSetRoutine(settings, toolOffsets = { x: 0, y: 0, z: 0 }, toolNumber) {
+// === Keeping a Z0 that was set before any Tool Length Reference ===
+//
+// The offset this plugin applies is absolute: G43.1 Z<machine Z where the
+// tool touched the setter>. Work Z = machine Z - G5x Z - TLO. A Z0 set
+// AFTER a reference exists is therefore right for every tool. A Z0 set
+// BEFORE one (TLO still 0) goes wrong the moment the first TLS applies an
+// offset: every tool is then shifted by the whole touch height and the
+// next cut plunges. That is the "zero first, TLS later" habit gSender
+// users bring with them.
+//
+// The host reports it (machineState.zeroSetWithoutTlr / zeroTool). While
+// the tool that set that Z0 is still the one in the spindle we can keep it:
+// the first offset we apply is paid back in the work offset, so
+// G5x Z + TLO does not change.
+//   'keepSelf'  measure this tool, apply its offset, shift G5x Z by it.
+//   'reference' measure the tool that set Z0 and only remember its touch
+//               height (#<_nc_ref_tlo>); nothing is applied yet.
+//   'keepRef'   measure the new tool, apply its offset, shift G5x Z by the
+//               remembered height. Net result: the new tool's tip is right
+//               relative to the Z0 the operator set with the old one.
+// The work offset is written only after the new offset is active and the
+// host has been told, so it never looks like a fresh unreferenced Z0.
+function zeroKeepPlan(context, currentTool) {
+  const ms = (context && context.machineState) || {};
+  const pending = ms.zeroSetWithoutTlr === true && ms.toolLengthSet !== true;
+  const zeroTool = typeof ms.zeroTool === 'number' ? ms.zeroTool : 0;
+  return { keep: pending && zeroTool === currentTool, swapped: pending && zeroTool !== currentTool };
+}
+
+function createToolLengthSetRoutine(settings, toolOffsets = { x: 0, y: 0, z: 0 }, toolNumber, options = {}) {
   const tlsX = settings.toolSetter.x + (toolOffsets.x || 0);
   const tlsY = settings.toolSetter.y + (toolOffsets.y || 0);
   const tlsZ = toolOffsets.z || 0;
@@ -236,6 +264,18 @@ function createToolLengthSetRoutine(settings, toolOffsets = { x: 0, y: 0, z: 0 }
     G38.4 G91 Z5 F${fineProbeFeedrate}`;
   }
 
+  const mode = options.mode || 'normal';
+  const applyOffset = mode === 'reference'
+    ? `(Remember the touch height of the tool that set Z0)
+    #<_nc_ref_tlo> = #<_rc_trigger_mach_z>`
+    : `G43.1 Z[#<_rc_trigger_mach_z>]
+    (Notify ncSender that toolLengthSet is now set)
+    $#=_tool_offset${mode === 'keepSelf' ? `
+    (Keep the Z0 that was set before this reference)
+    G10 L2 P[#5220] Z[#<_cur_wcs_z_ofs> - #<_rc_trigger_mach_z>]` : ''}${mode === 'keepRef' ? `
+    (Keep the Z0 that was set with the previous tool)
+    G10 L2 P[#5220] Z[#<_cur_wcs_z_ofs> - #<_nc_ref_tlo>]` : ''}`;
+
   return `
     G53 G0 Z${settings.zSafe}
     G53 G0 X${tlsX} Y${tlsY}
@@ -249,9 +289,7 @@ function createToolLengthSetRoutine(settings, toolOffsets = { x: 0, y: 0, z: 0 }
     #<_ofs_idx> = [#5220 * 20 + 5203]
     #<_cur_wcs_z_ofs> = #[#<_ofs_idx>]
     #<_rc_trigger_mach_z> = [#5063 + #<_cur_wcs_z_ofs>]
-    G43.1 Z[#<_rc_trigger_mach_z>]
-    (Notify ncSender that toolLengthSet is now set)
-    $#=_tool_offset
+    ${applyOffset}
     G53 G91 G0 Z${settings.zSafe}
   `.trim();
 }
@@ -466,8 +504,31 @@ function modalSafe(snippet, tag) {
 // percentage -- so the job resumes at exactly the override the operator set.
 // #<_speed_override> is the pre-existing enable state (a program may have
 // disabled overrides itself), so restore what was there, not a hard-coded on.
-function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets = { x: 0, y: 0 }) {
-  const tlsRoutine = createToolLengthSetRoutine(settings, toolOffsets, toolNumber);
+// options.keepZero      — Z0 was set with the tool in the spindle before any
+//                         reference existed; carry it over (see zeroKeepPlan).
+// options.currentOffsets — tool library offsets of the tool in the spindle.
+// options.returnTo       — machine XY to go back to at safe Z once the change
+//                         is done, so the job's spindle start happens where
+//                         the job left off rather than above the tool setter.
+function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets = { x: 0, y: 0 }, options = {}) {
+  const keepZero = !!options.keepZero;
+  // Measuring the tool that set Z0 first only matters when a new tool will
+  // be measured after it; for an unload-only change, fix the reference now.
+  const keepViaReference = keepZero && toolNumber !== 0;
+  const tlsRoutine = createToolLengthSetRoutine(settings, toolOffsets, toolNumber,
+    { mode: keepViaReference ? 'keepRef' : 'normal' });
+  const zeroKeepSection = keepZero
+    ? `(Measure T${currentTool} first: it set Z0 before a tool length reference existed)
+    (MSG, ZERO_KEEP_START T${currentTool})
+    ${createToolLengthSetRoutine(settings, options.currentOffsets || { x: 0, y: 0, z: 0 }, currentTool,
+      { mode: keepViaReference ? 'reference' : 'keepSelf' })}
+    G53 G0 Z${settings.zSafe}
+    (MSG, ZERO_KEEP_END)`
+    : '';
+  const returnTo = options.returnTo;
+  const returnSection = returnTo && isFinite(returnTo.x) && isFinite(returnTo.y)
+    ? `G53 G0 X${returnTo.x} Y${returnTo.y}`
+    : '';
   const hasUnload = currentTool !== 0;
 
   const unloadSection = buildUnloadTool(settings, currentTool, toolNumber);
@@ -484,9 +545,11 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
     G21
     M51 P0
     M5
+    ${zeroKeepSection}
     ${unloadSection}
     ${loadSection}
     G53 G0 Z${settings.zSafe}
+    ${returnSection}
     M51 P[#<return_spov>]
     G[#<return_units>]
     G90
@@ -512,7 +575,8 @@ function handleTLSCommand(commands, context, settings) {
   const toolOffsets = getToolOffsets(currentTool, context.tools);
 
   const tlsCommand = commands[tlsIndex];
-  const toolLengthSetRoutine = createToolLengthSetRoutine(settings, toolOffsets, currentTool);
+  const toolLengthSetRoutine = createToolLengthSetRoutine(settings, toolOffsets, currentTool,
+    { mode: zeroKeepPlan(context, currentTool).keep ? 'keepSelf' : 'normal' });
 
   const preToolChangeCmd = settings.preToolChangeGcode?.trim() || '';
   const postToolChangeCmd = settings.postToolChangeGcode?.trim() || '';
@@ -590,65 +654,6 @@ function handlePocket1Command(commands, settings) {
   commands.splice(pocket1Index, 1, ...expandedCommands);
 }
 
-function handleHomeCommand(commands, context, settings) {
-  const homeIndex = commands.findIndex(cmd =>
-    cmd.isOriginal && cmd.command.trim().toUpperCase() === '$H'
-  );
-
-  if (homeIndex === -1) {
-    return;
-  }
-
-  if (!settings.performTlsAfterHome) {
-    return;
-  }
-
-  const currentTool = context.machineState?.tool ?? 0;
-  const toolOffsets = getToolOffsets(currentTool, context.tools);
-
-  const homeCommand = commands[homeIndex];
-  const tlsRoutine = createToolLengthSetRoutine(settings, toolOffsets, currentTool);
-
-  const preToolChangeCmd = settings.preToolChangeGcode?.trim() || '';
-  const postToolChangeCmd = settings.postToolChangeGcode?.trim() || '';
-
-  const gcode = `
-    $H
-    #<return_units> = [20 + #<_metric>]
-    o100 IF [[#<_tool_offset> EQ 0] AND [#<_current_tool> NE 0]]
-      ${modalSafe(preToolChangeCmd, 'pre')}
-      G21
-      ${tlsRoutine}
-      G53 G0 Z${settings.zSafe}
-      G4 P0
-      G53 G0 X0 Y0
-      ${modalSafe(postToolChangeCmd, 'post')}
-    o100 ENDIF
-    G[#<return_units>]
-  `.trim();
-
-  const homeProgram = formatGCode(gcode);
-  const showMacroCommand = settings.showMacroCommand ?? false;
-
-  const expandedCommands = homeProgram.map((line, index) => {
-    if (index === 0) {
-      return {
-        command: line,
-        displayCommand: showMacroCommand ? null : homeCommand.command.trim(),
-        isOriginal: false
-      };
-    } else {
-      return {
-        command: line,
-        displayCommand: null,
-        isOriginal: false,
-        meta: showMacroCommand ? {} : { silent: true }
-      };
-    }
-  });
-
-  commands.splice(homeIndex, 1, ...expandedCommands);
-}
 
 // Returns 'proceed' | 'stopped' | 'pause' — see RapidChangeATC's
 // matching helper for the semantics. Only fires when RapidChangeSolo
@@ -724,8 +729,13 @@ function handleM6Command(commands, context, settings) {
   const toolNumber = parsed.toolNumber;
   const currentTool = context.machineState?.tool ?? 0;
   const toolOffsets = getToolOffsets(toolNumber, context.tools);
+  const mpos = context.machineState?.mpos;
 
-  const toolChangeProgram = buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets);
+  const toolChangeProgram = buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets, {
+    keepZero: zeroKeepPlan(context, currentTool).keep,
+    currentOffsets: getToolOffsets(currentTool, context.tools),
+    returnTo: mpos && typeof mpos.x === 'number' && typeof mpos.y === 'number' ? { x: mpos.x, y: mpos.y } : null,
+  });
   const showMacroCommand = settings.showMacroCommand ?? false;
 
   const expandedCommands = toolChangeProgram.map((line, index) => {
@@ -756,7 +766,6 @@ function onBeforeCommand(commands, context, settings) {
     settings.zSafe = context.safeZHeight;
   }
 
-  handleHomeCommand(commands, context, settings);
   handleTLSCommand(commands, context, settings);
   handlePocket1Command(commands, settings);
   handleM6Command(commands, context, settings);

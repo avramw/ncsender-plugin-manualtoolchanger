@@ -1141,27 +1141,6 @@
             </div>
           </div>
         </div>
-
-        <div class="rc-card">
-          <h3 class="rc-card-title">
-            <span>Perform TLS after first <code>$H</code></span>
-            <div class="rcs-toggle-switch" id="rcs-perform-tls-after-home-toggle">
-              <div class="rcs-toggle-switch-knob"></div>
-            </div>
-          </h3>
-          <p class="rc-card-help">Auto-runs a Tool Length Setter probe cycle after the first homing operation.</p>
-          <div class="rc-warn-banner" id="rcs-tls-after-home-warning">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-              <path d="M12 9v4"/>
-              <path d="M12 17h.01"/>
-            </svg>
-            <div>
-              <strong>Machine moves on its own after homing.</strong>
-              With this on, the spindle travels to the tool setter and probes as soon as the first <code>$H</code> completes. Keep hands off the machine and the work area clear while it runs.
-            </div>
-          </div>
-        </div>
       </div>
 
       <footer class="rc-panel-footer">
@@ -1567,7 +1546,6 @@
       setClassToggle('rcs-pause-before-unload-toggle', initialConfig.pauseBeforeUnload);
       setClassToggle('rcs-wait-for-spindle-toggle', initialConfig.waitForSpindle);
       setClassToggle('rcs-show-macro-command-toggle', initialConfig.showMacroCommand);
-      setClassToggle('rcs-perform-tls-after-home-toggle', initialConfig.performTlsAfterHome);
       setClassToggle('rcs-add-probe', initialConfig.addProbe);
       setClassToggle('rcs-legacy-probe', initialConfig.legacyProbe);
     };
@@ -1652,7 +1630,6 @@
       const pauseBeforeUnloadToggle = document.getElementById('rcs-pause-before-unload-toggle');
       const waitForSpindleToggle = document.getElementById('rcs-wait-for-spindle-toggle');
       const showMacroCommandToggle = document.getElementById('rcs-show-macro-command-toggle');
-      const performTlsAfterHomeToggle = document.getElementById('rcs-perform-tls-after-home-toggle');
       const addProbeToggle = document.getElementById('rcs-add-probe');
       const legacyProbeToggle = document.getElementById('rcs-legacy-probe');
 
@@ -1684,7 +1661,6 @@
         pauseBeforeUnload: pauseBeforeUnloadToggle ? pauseBeforeUnloadToggle.classList.contains('active') : true,
         waitForSpindle: waitForSpindleToggle ? waitForSpindleToggle.classList.contains('active') : true,
         showMacroCommand: showMacroCommandToggle ? showMacroCommandToggle.classList.contains('active') : false,
-        performTlsAfterHome: performTlsAfterHomeToggle ? performTlsAfterHomeToggle.classList.contains('active') : false,
         addProbe: addProbeToggle ? addProbeToggle.classList.contains('active') : false,
         probeLoadGcode: probeLoadEditor ? probeLoadEditor.getValue() : '',
         probeUnloadGcode: probeUnloadEditor ? probeUnloadEditor.getValue() : '',
@@ -2016,7 +1992,6 @@
     wireClassToggle('rcs-pause-before-unload-toggle');
     wireClassToggle('rcs-wait-for-spindle-toggle');
     wireClassToggle('rcs-show-macro-command-toggle');
-    wireClassToggle('rcs-perform-tls-after-home-toggle');
     wireClassToggle('rcs-add-probe', updateProbeGcodeState);
     wireClassToggle('rcs-legacy-probe', updateProbeGcodeState);
 
